@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 namespace esphome::uart_tcp {
 
@@ -101,7 +102,21 @@ static size_t parse_allow_list(const char *p, socket::Ipv4AllowEntry *out, size_
   return count;
 }
 
+UartTcp *UartTcp::create() {
+  void *mem = RAMAllocator<UartTcp>(RAMAllocator<UartTcp>::ALLOC_EXTERNAL).allocate(1);
+  if (mem != nullptr)
+    return new (mem) UartTcp();
+  auto *uart_tcp = new UartTcp();  // only to report in setup() and fail there
+  uart_tcp->no_psram_ = true;
+  return uart_tcp;
+}
+
 void UartTcp::setup() {
+  if (this->no_psram_) {
+    ESP_LOGE(TAG, "No PSRAM for the link");
+    this->mark_failed();
+    return;
+  }
   RAMAllocator<Settings> allocator(RAMAllocator<Settings>::ALLOC_EXTERNAL);
   this->settings_ = allocator.allocate(1);
   if (this->settings_ == nullptr) {
@@ -145,16 +160,19 @@ void UartTcp::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "UART TCP:\n"
                 "  %s: %s:%u\n"
-                "  Reconnect Interval: %" PRIu32 "ms",
+                "  Reconnect Interval: %" PRIu32 "ms\n"
+                "  Timeout: %" PRIu32 "ms",
                 this->server_ ? LOG_STR_LITERAL("Listen") : LOG_STR_LITERAL("Host"),
                 this->server_ ? LOG_STR_LITERAL("*") : this->link_.host(), this->link_.port(),
-                this->link_.reconnect_interval());
+                this->link_.reconnect_interval(), this->link_.idle_timeout());
   if (!this->is_enabled()) {
     ESP_LOGCONFIG(TAG, "  Disabled");
   }
-  if (this->link_.idle_timeout() != 0) {
-    ESP_LOGCONFIG(TAG, "  Timeout: %" PRIu32 "ms", this->link_.idle_timeout());
+#ifdef USE_UART_TCP_RFC2217
+  if (this->rfc2217_) {
+    ESP_LOGCONFIG(TAG, "  Protocol: RFC 2217");
   }
+#endif
 #ifdef USE_NOISE_STREAM
   if (this->noise_ != nullptr) {
 #ifdef USE_NOISE_STREAM_RUNTIME_KEY
@@ -199,6 +217,11 @@ void UartTcp::sync_link_(bool up) {
       // The driver kept whatever arrived while the link was down.
       this->discard_uart_();
     }
+#ifdef USE_UART_TCP_RFC2217
+    if (this->rfc2217_) {
+      this->rfc_start_();
+    }
+#endif
 #ifdef USE_NOISE_STREAM
     // The handshake's last read can leave session bytes the socket's ready flag does not show
     if (this->noise_ != nullptr) {
@@ -210,11 +233,19 @@ void UartTcp::sync_link_(bool up) {
   PUBLISH_STATE(this->connected_binary_sensor_, up);
 #endif
   // Only edges get here, so down is the falling edge.
-  if (!up && this->disconnects_sensor_ != nullptr) {
+  if (up) {
+    this->connected_ms_ = App.get_loop_component_start_time();
+  } else {
     this->disconnects_++;
-    this->disconnects_sensor_->publish_state(this->disconnects_);
-  }
+#ifdef USE_SENSOR
+    if (this->disconnects_sensor_ != nullptr) {
+      this->disconnects_sensor_->publish_state(this->disconnects_);
+    }
 #endif
+  }
+  if (this->connection_cb_ != nullptr) {
+    this->connection_cb_(this->connection_arg_, up);
+  }
 }
 
 void UartTcp::read_socket_() {
@@ -229,6 +260,16 @@ void UartTcp::read_socket_() {
   }
   uint8_t tmp[READ_CHUNK];
   size_t want = std::min(room, sizeof(tmp));
+#ifdef USE_UART_TCP_RFC2217
+  if (this->rfc2217_) {
+    want = std::min<size_t>(want, this->tx_room_() * 7 / 10);
+    if (want == 0) {
+      this->rx_pending_ = true;
+      this->link_.note_io();
+      return;
+    }
+  }
+#endif
 #ifdef USE_NOISE_STREAM
   ssize_t count = this->noise_ != nullptr ? this->noise_->read(this->link_, tmp, want) : this->link_.read(tmp, want);
 #else
@@ -242,7 +283,15 @@ void UartTcp::read_socket_() {
     return;
   }
   this->rx_pending_ = static_cast<size_t>(count) == want;
-  this->write_array(tmp, static_cast<size_t>(count));
+  size_t len = static_cast<size_t>(count);
+#ifdef USE_UART_TCP_RFC2217
+  if (this->rfc2217_) {
+    len = this->rfc_decode_(tmp, len);
+  }
+#endif
+  if (len != 0) {
+    this->write_array(tmp, len);
+  }
   this->last_write_ms_ = App.get_loop_component_start_time();
 }
 
@@ -260,6 +309,21 @@ void UartTcp::discard_uart_() {
 }
 
 void UartTcp::read_uart_() {
+#ifdef USE_UART_TCP_RFC2217
+  if (this->rfc2217_) {
+    if (this->rfc_.suspended) {
+      return;
+    }
+    uint8_t tmp[READ_CHUNK];
+    for (;;) {
+      size_t want = std::min({this->available(), this->tx_room_() / 2, sizeof(tmp) / 2});
+      if (want == 0 || !this->read_array(tmp, want)) {
+        return;
+      }
+      this->tx_put_(tmp, rfc_escape_(tmp, want));
+    }
+  }
+#endif
 #ifdef USE_NOISE_STREAM
   if (this->noise_ != nullptr) {
     // Plaintext goes into the stream's open frame, so it cannot fill the link's buffer directly.
@@ -316,6 +380,11 @@ void UartTcp::default_settings_() {
   s.reconnect_ms = this->link_.reconnect_interval();
   s.port = this->link_.port();
   s.flags = this->server_ ? FLAG_SERVER : 0;
+#ifdef USE_UART_TCP_RFC2217
+  if (this->rfc2217_) {
+    s.flags |= FLAG_RFC2217;
+  }
+#endif
   const char *host = this->link_.host();
   if (host != nullptr) {
     std::strncpy(s.host, host, HOST_MAX);
@@ -334,6 +403,9 @@ void UartTcp::use_settings_() {
   this->link_.set_host(s.host);
   this->listener_.set_allow(s.allow, s.allow_count);
   this->server_ = (s.flags & FLAG_SERVER) != 0;
+#ifdef USE_UART_TCP_RFC2217
+  this->rfc2217_ = (s.flags & FLAG_RFC2217) != 0;
+#endif
 }
 
 void UartTcp::use_role_() {
@@ -451,6 +523,22 @@ void UartTcp::apply_server(bool server) {
   this->use_role_();
   this->save_settings_();
 }
+
+#ifdef USE_UART_TCP_RFC2217
+void UartTcp::apply_protocol(bool rfc2217) {
+  if (this->settings_ == nullptr) {
+    return;
+  }
+  if (rfc2217) {
+    this->settings_->flags |= FLAG_RFC2217;
+  } else {
+    this->settings_->flags &= ~FLAG_RFC2217;
+  }
+  this->restart_link_();
+  this->use_settings_();
+  this->save_settings_();
+}
+#endif
 
 bool UartTcp::apply_host(const std::string &host) {
   if (this->settings_ == nullptr || host.size() > HOST_MAX) {

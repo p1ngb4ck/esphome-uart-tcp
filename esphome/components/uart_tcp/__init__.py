@@ -13,6 +13,7 @@ from esphome.const import (
     CONF_ID,
     CONF_KEY,
     CONF_PORT,
+    CONF_PROTOCOL,
     CONF_TIMEOUT,
     CONF_UART_ID,
 )
@@ -51,6 +52,9 @@ BASE_SCHEMA = cv.Schema(
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_TIMEOUT, default="0s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_ENCRYPTION): noise.STREAM_ENCRYPTION_SCHEMA,
+        cv.Optional(CONF_PROTOCOL, default="raw"): cv.one_of(
+            "raw", "rfc2217", lower=True
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -101,6 +105,8 @@ def _final_validate(config: ConfigType) -> ConfigType:
     uart.claim_exclusive(config, DOMAIN)
 
     if config[CONF_ROLE] == "server":
+        full_config = fv.full_config.get()
+        data = full_config.data.setdefault(DOMAIN, {})
         # Two listeners on one port cannot both serve it. Only uart_tcp and
         # tcp_uart servers are compared here, not other listeners such as api.
         port = config[CONF_PORT]
@@ -179,10 +185,14 @@ def _forwardable_uarts() -> list[ID]:
 async def _forwards_to_code(config: ConfigType) -> None:
     from esphome.components.storage import request_storage_worker
 
+    # In PSRAM, as its runners
+    create = cg.MockObj(str(UartTcpForwards), "::").create()
+    var = cg.Pvariable(config[CONF_ID], create)
     await cg.register_component(var, config)
     cg.add_define("USE_UART_TCP_FORWARDS")
     socket.require_tcp_listener()
     cg.add_define("USE_SOCKET_IPV4_ALLOW")
+    cg.add_define("USE_UART_TCP_RFC2217")
     request_storage_worker()
     cg.add(var.set_runners_default(config[CONF_RUNNERS]))
     cg.add(var.set_settings_file_default(config[CONF_SETTINGS_FILE]))
@@ -192,17 +202,35 @@ async def _forwards_to_code(config: ConfigType) -> None:
     cg.add(var.init_uarts(len(uarts)))
     for uart_id in uarts:
         uart_var = await cg.get_variable(uart_id)
+        if _is_usb_uart_channel(uart_id):
+            cg.add_define("USE_UART_TCP_MODEM_CONTROL")
         cg.add(var.add_uart(uart_var, uart_id.id))
 
 
+def _is_usb_uart_channel(uart_id: ID) -> bool:
+    from esphome.components import usb_uart
+
+    return uart_id.type.inherits_from(usb_uart.USBUartChannel)
+
+
 async def to_code(config: ConfigType) -> None:
-    var = await uart.new_uart_component(config)
     if config[CONF_ROLE] == ROLE_FORWARDS:
         await _forwards_to_code(config)
         return
+    # In PSRAM: the object holds the link's TX buffer
+    create = cg.MockObj(str(UartTcp), "::").create()
+    var = cg.Pvariable(config[CONF_ID], create)
+    await cg.register_component(var, config)
+    await uart.register_uart_device(var, config)
     uart_id, uart_var = await cg.get_variable_with_full_id(config[CONF_UART_ID])
     if uart_id.type.inherits_from(uart.VirtualUARTComponent):
         cg.add(var.set_virtual_uart(uart_var))
+    if _is_usb_uart_channel(uart_id):
+        cg.add_define("USE_UART_TCP_MODEM_CONTROL")
+        cg.add(var.set_modem(uart_var))
+    if config[CONF_PROTOCOL] == "rfc2217":
+        cg.add_define("USE_UART_TCP_RFC2217")
+        cg.add(var.set_rfc2217(True))
     # Both roles and the allow list are compiled; the runtime settings switch them.
     socket.require_tcp_listener()
     cg.add_define("USE_SOCKET_IPV4_ALLOW")
@@ -216,7 +244,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_reconnect_interval(config[CONF_RECONNECT_INTERVAL]))
     if (timeout := config[CONF_TIMEOUT]).total_milliseconds > 0:
-        cg.add(var.set_timeout(timeout))
+        cg.add(var.set_idle_timeout(timeout))
     cg.add_optional(var.set_host, config.get(CONF_HOST))
     if (encryption := config.get(CONF_ENCRYPTION)) is not None:
         # The TCP client starts the handshake
