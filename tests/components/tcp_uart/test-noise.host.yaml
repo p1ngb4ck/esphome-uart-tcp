@@ -1,4 +1,0 @@
-packages:
-  tcp_uart: !include common-noise.yaml
-
-wifi: !remove
