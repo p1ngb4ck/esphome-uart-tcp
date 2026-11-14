@@ -106,3 +106,25 @@ This topic is built on [Bascht74](https://github.com/Bascht74)'s work: the virtu
 claim, the encrypted noise stream for `tcp_uart` / `uart_tcp`, the runtime key, the idle close, and several links
 and connections per port. Thank you for a great collaboration and for all those pull requests. Everyone this project
 builds on: [ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
+
+## Branch structure
+
+Each `pr/` branch holds one part of this topic on top of upstream and says in its `BRANCH.md` what it is based on. `main` holds all of them.
+
+| Branch | Based on |
+|---|---|
+| `pr/logger-log-ring` | `pr/uart-tcp-logger-psram` |
+| `pr/logger-virtual-uart` | `pr/uart-virtual-ring` |
+| `pr/noise-shared-key` | `pr/uart-debugger-prefix-settings`, `pr/uart-runtime-line-settings` |
+| `pr/socket-loop-interval` | `pr/uart-tcp-change-callbacks` |
+| `pr/socket-peer-address` | `pr/uart-tcp-forwards` |
+| `pr/uart-debugger-prefix-settings` | upstream only |
+| `pr/uart-runtime-line-settings` | upstream only |
+| `pr/uart-tcp-change-callbacks` | `pr/uart-tcp-logger-getters` |
+| `pr/uart-tcp-forwards` | `pr/uart-tcp-virtual-peer` |
+| `pr/uart-tcp-logger-getters` | `pr/socket-peer-address` |
+| `pr/uart-tcp-logger-psram` | `pr/socket-loop-interval` |
+| `pr/uart-tcp-rfc2217` | `pr/logger-log-ring` |
+| `pr/uart-tcp-runtime-settings` | `pr/noise-shared-key` |
+| `pr/uart-tcp-virtual-peer` | `pr/logger-virtual-uart` |
+| `pr/uart-virtual-ring` | `pr/uart-tcp-runtime-settings` |
