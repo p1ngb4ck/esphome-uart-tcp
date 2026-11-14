@@ -22,6 +22,7 @@ from esphome.const import (
     CONF_PRIORITY,
 )
 from esphome.core import CORE, ID
+from esphome.core.config import CONF_LOOP_INTERVAL, get_loop_interval
 from esphome.cpp_generator import MockObj, MockObjClass
 import esphome.final_validate as fv
 from esphome.helpers import fnv1_hash
@@ -211,6 +212,7 @@ def final_validate_reconnect_interval(config: ConfigType) -> ConfigType:
     handshake."""
     if CONF_ENCRYPTION not in config:
         return config
+    loop_interval = get_loop_interval()
     if config[CONF_RECONNECT_INTERVAL] < loop_interval:
         raise cv.Invalid(
             f"With {CONF_ENCRYPTION}, {CONF_RECONNECT_INTERVAL} must last at least one "
