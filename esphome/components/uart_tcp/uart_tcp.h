@@ -17,9 +17,6 @@
 #ifdef USE_UART_VIRTUAL
 #include "esphome/components/uart/uart_virtual.h"
 #endif
-#ifdef USE_UART_TCP_MODEM_CONTROL
-#include "esphome/components/usb_uart/usb_uart.h"
-#endif
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
@@ -49,10 +46,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
   static constexpr size_t HOST_MAX = 253;
   static constexpr size_t MAX_ALLOWED_IPS = 16;
 
-  /// The object in PSRAM (codegen makes it so). Without PSRAM a plain one that fails its setup; no working copy
-  /// in internal RAM.
-  static UartTcp *create();
-
   // The yaml values; saved runtime settings replace them in setup().
   void set_host(const char *host) { this->link_.set_host(host); }
   void set_port(uint16_t port) { this->link_.set_port(port); }
@@ -69,15 +62,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #endif
   /// The key of the saved runtime settings, from the entry id.
   void set_settings_key(uint32_t key) { this->settings_key_ = key; }
-#ifdef USE_UART_TCP_RFC2217
-  void set_rfc2217(bool rfc2217) { this->rfc2217_ = rfc2217; }
-  void apply_protocol(bool rfc2217);
-  bool is_rfc2217() const { return this->rfc2217_; }
-  void line_settings_changed();
-#endif
-#ifdef USE_UART_TCP_MODEM_CONTROL
-  void set_modem(usb_uart::USBUartChannelBase *modem) { this->modem_ = modem; }
-#endif
 #ifdef USE_NOISE_STREAM
   void set_noise_stream(noise::NoiseStream *stream) { this->noise_ = stream; }
 #endif
@@ -116,10 +100,9 @@ class UartTcp final : public Component, public uart::UARTDevice {
   uint32_t connected_since() const { return this->connected_ms_; }
   size_t peer_address(std::span<char, socket::SOCKADDR_STR_LEN> buf) const { return this->link_.peer_address(buf); }
   uint32_t get_disconnects() const { return this->disconnects_; }
-  /// One listener, called with true on a connect, false on a disconnect.
-  void set_on_connection(void (*callback)(void *arg, bool up), void *arg) {
-    this->connection_cb_ = callback;
-    this->connection_arg_ = arg;
+  /// Called with true on a connect, false on a disconnect.
+  template<typename F> void add_on_connection_callback(F &&callback) {
+    this->connection_callback_.add(std::forward<F>(callback));
   }
 
   void setup() override;
@@ -130,7 +113,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
 
   static constexpr uint8_t FLAG_DISABLED = 1 << 0;
   static constexpr uint8_t FLAG_SERVER = 1 << 1;
-  static constexpr uint8_t FLAG_RFC2217 = 1 << 2;
 
   /// Saved as is (prefs, or a forwards settings file line); lives in PSRAM.
   struct Settings {
@@ -188,51 +170,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
   /// Close the link and the listener; the next loop opens them with the current settings.
   void restart_link_();
   void save_settings_();
-  size_t tx_room_() {
-#ifdef USE_NOISE_STREAM
-    if (this->noise_ != nullptr) {
-      return this->noise_->tx_free(this->link_);
-    }
-#endif
-    return this->link_.tx_free();
-  }
-  void tx_put_(const uint8_t *data, size_t len) {
-#ifdef USE_NOISE_STREAM
-    if (this->noise_ != nullptr) {
-      this->noise_->queue(this->link_, data, len);
-      return;
-    }
-#endif
-    this->link_.queue(data, len);
-  }
-#ifdef USE_UART_TCP_RFC2217
-  struct Rfc2217 {
-    enum State : uint8_t { DATA, COMMAND, OPTION, SUBNEG, SUBNEG_IAC };
-    State state{DATA};
-    uint8_t verb{0};
-    uint8_t sb_len{0};
-    uint8_t sb[8]{};
-    uint8_t local_sent{0};
-    uint8_t remote_sent{0};
-    bool suspended{false};
-    bool com_port{false};
-    bool dtr{true};
-    bool rts{true};
-  };
-  static constexpr size_t RFC_REPLY_MAX = 32;
-  static size_t rfc_escape_(uint8_t *data, size_t len);
-  size_t rfc_decode_(uint8_t *data, size_t len);
-  void rfc_start_();
-  void rfc_send_line_settings_();
-  void rfc_negotiate_(uint8_t verb, uint8_t option);
-  void rfc_command_();
-  void rfc_apply_line_(uint8_t command, const uint8_t *value, size_t len);
-  void rfc_control_(uint8_t value);
-  void rfc_option_(uint8_t verb, uint8_t option);
-  void rfc_reply_(uint8_t command, const uint8_t *value, size_t len);
-  void rfc_reply_byte_(uint8_t command, uint8_t value);
-  void rfc_reply_baud_(uint8_t command, uint32_t baud);
-#endif
 
   static constexpr size_t READ_CHUNK = 128;
   // Scratch size for dropping stale UART bytes on connect.
@@ -246,13 +183,6 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #ifdef USE_UART_VIRTUAL
   uart::VirtualUARTComponent *virtual_uart_{nullptr};
 #endif
-#ifdef USE_UART_TCP_MODEM_CONTROL
-  usb_uart::USBUartChannelBase *modem_{nullptr};
-#endif
-#ifdef USE_UART_TCP_RFC2217
-  Rfc2217 rfc_{};
-  bool rfc2217_{false};
-#endif
   // The runtime settings, in PSRAM; the link's host and the listener's allow list point into it.
   Settings *settings_{nullptr};
   ESPPreferenceObject pref_;
@@ -265,13 +195,10 @@ class UartTcp final : public Component, public uart::UARTDevice {
 #endif
   // Loop start time of the last socket-to-UART write; sizes the next paced write.
   uint32_t last_write_ms_{0};
-  void (*connection_cb_)(void *, bool){nullptr};
-  void *connection_arg_{nullptr};
+  LazyCallbackManager<void(bool)> connection_callback_;
   uint32_t disconnects_{0};
   uint32_t connected_ms_{0};
   bool server_{false};
-  // create() found no PSRAM: setup() fails.
-  bool no_psram_{false};
   // The link state loop() saw last; edges clear the buffer and publish the sensor.
   bool link_was_up_{false};
   // A read stopped before EAGAIN. ready() stays false until new data arrives.
