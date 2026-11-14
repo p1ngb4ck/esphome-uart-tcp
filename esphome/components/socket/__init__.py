@@ -8,9 +8,10 @@ import esphome.codegen as cg
 from esphome.components.const import CONF_ROLE
 from esphome.config_helpers import filter_source_files_from_defines
 import esphome.config_validation as cv
-from esphome.const import CONF_TIMEOUT
-from esphome.core import CORE, ID
-from esphome.core.config import CONF_LOOP_INTERVAL, get_loop_interval
+from esphome.const import CONF_ESPHOME, CONF_TIMEOUT
+from esphome.core import CORE, ID, TimePeriodMilliseconds
+from esphome.core.config import CONF_LOOP_INTERVAL
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +42,17 @@ MIN_UDP_SOCKETS = 6
 # Minimum listening sockets — at least api + ota baseline.
 MIN_TCP_LISTEN_SOCKETS = 2
 
+# Application::loop_interval_ when esphome: sets no loop_interval. Kept here: the fork's components run on an
+# installed ESPHome core, which external_components cannot replace.
+_DEFAULT_LOOP_INTERVAL = TimePeriodMilliseconds(milliseconds=16)
+
+
+def get_loop_interval() -> TimePeriodMilliseconds:
+    """Return the main loop interval of the configuration; for final validation."""
+    return fv.full_config.get()[CONF_ESPHOME].get(
+        CONF_LOOP_INTERVAL, _DEFAULT_LOOP_INTERVAL
+    )
+
 
 class SocketType(StrEnum):
     TCP = "tcp"
@@ -59,6 +71,8 @@ def consume_sockets(
     value: int, consumer: str, socket_type: SocketType = SocketType.TCP
 ) -> Callable[[MutableMapping], MutableMapping]:
     """Register socket usage for a component.
+
+    On nRF52 the TCP stack is only built when a component registers a TCP socket.
 
     Args:
         value: Number of sockets needed by the component
@@ -126,6 +140,19 @@ def get_socket_counts() -> SocketCounts:
     )
     return SocketCounts(
         tcp, udp, tcp_listen, tcp_details, udp_details, tcp_listen_details
+    )
+
+
+def needs_tcp() -> bool:
+    """True when a component registered a TCP or listening socket, or loads async_tcp.
+
+    async_tcp is TCP only but leaves socket registration to its users.
+    Valid from code generation on, once every component has validated.
+    """
+    return bool(
+        CORE.data.get(KEY_SOCKET_CONSUMERS_TCP)
+        or CORE.data.get(KEY_SOCKET_CONSUMERS_TCP_LISTEN)
+        or "async_tcp" in CORE.loaded_integrations
     )
 
 
@@ -226,7 +253,7 @@ def consume_role_sockets(
 ) -> Callable[[ConfigType], ConfigType]:
     """Socket accounting for a role keyed client or server schema.
 
-    A server holds as many connections as its connections_key says, default 1.
+    A server holds as many connections as its connections_key says, otherwise 1.
     Also requires IPv4, since the TCP link and listener helpers are IPv4 only.
     """
 
@@ -234,11 +261,10 @@ def consume_role_sockets(
         from esphome.components import network
 
         network.require_ipv4(component)(config)
-        count = 1
-        if config[CONF_ROLE] == "server":
+        server = config[CONF_ROLE] == "server"
+        if server:
             consume_sockets(1, component, SocketType.TCP_LISTEN)(config)
-            if connections_key is not None:
-                count = config.get(connections_key, 1)
+        count = config[connections_key] if server and connections_key else 1
         return consume_sockets(count, component)(config)
 
     return validator
