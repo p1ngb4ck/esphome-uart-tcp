@@ -105,6 +105,8 @@ def _final_validate(config: ConfigType) -> ConfigType:
     uart.claim_exclusive(config, DOMAIN)
 
     if config[CONF_ROLE] == "server":
+        full_config = fv.full_config.get()
+        data = full_config.data.setdefault(DOMAIN, {})
         # Two listeners on one port cannot both serve it. Only uart_tcp and
         # tcp_uart servers are compared here, not other listeners such as api.
         port = config[CONF_PORT]
@@ -242,7 +244,7 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_reconnect_interval(config[CONF_RECONNECT_INTERVAL]))
     if (timeout := config[CONF_TIMEOUT]).total_milliseconds > 0:
-        cg.add(var.set_timeout(timeout))
+        cg.add(var.set_idle_timeout(timeout))
     cg.add_optional(var.set_host, config.get(CONF_HOST))
     if (encryption := config.get(CONF_ENCRYPTION)) is not None:
         # The TCP client starts the handshake
