@@ -23,6 +23,8 @@ class TcpListener {
 #ifdef USE_SOCKET_IPV4_ALLOW
   void set_allow(const Ipv4AllowEntry *entries, size_t count) { this->allow_.set(entries, count); }
 #endif
+  /// Connections the stack may queue for accept(); call before the first poll.
+  void set_backlog(uint8_t backlog) { this->backlog_ = backlog; }
 
   /// Call from setup(); tag names the log lines.
   void begin(const char *tag) { this->tag_ = tag; }
@@ -61,6 +63,8 @@ class TcpListener {
 #ifdef USE_SOCKET_IPV4_ALLOW
   Ipv4Allow allow_;
 #endif
+  // One client at a time by default; a second connection waits in the stack until the first drops.
+  uint8_t backlog_{1};
 };
 
 }  // namespace esphome::socket
